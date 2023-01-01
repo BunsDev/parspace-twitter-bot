@@ -1,0 +1,10 @@
+{
+  "include": ["src/**/*.ts"],
+  "compilerOptions": {
+    "target": "ES2022",
+    "moduleResolution": "node",
+    "module": "ES2022",
+    "outDir": "dist/",
+    "allowSyntheticDefaultImports": true
+  }
+}
