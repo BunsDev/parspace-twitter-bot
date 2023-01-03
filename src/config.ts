@@ -11,3 +11,4 @@ export const config = {
     endpoint: (process.env.ETHEREUM_ENDPOINT ?? "").trim()
   }
 }
+

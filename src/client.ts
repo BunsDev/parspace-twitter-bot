@@ -3,6 +3,8 @@ import {config} from "./config.js"
 import crypto from "node:crypto"
 import {ParaspaceMM, Provider, Environment, NetworkName, Types} from "paraspace-api"
 import interval from "interval-promise"
+import {logger} from "./logger.js"
+import retry from "promise-retry"
 
 export class BotClient {
   #authClient: auth.OAuth2User
@@ -29,13 +31,12 @@ export class BotClient {
   }
 
   checkState(state: string) {
-    console.log(`expected: ${this.#oauthState}, actual: ${state}`)
+    logger.debug(`expected: ${this.#oauthState}, actual: ${state}`)
     return state === this.#oauthState
   }
 
   getAuthURL() {
     this.#oauthState = crypto.randomBytes(64).toString("hex");
-    this.#oauthState = "whatthefuck"
     return this.#authClient.generateAuthURL({
       state: this.#oauthState,
       code_challenge_method: "s256"
@@ -48,8 +49,8 @@ export class BotClient {
       await this.#authClient.requestAccessToken(code)
 
       await this.#provider.init();
-      this.#currentHeight = await this.#provider.getProvider().getBlockNumber();
-      this.#reportTweets()
+      this.#currentHeight = await retry(() => this.#provider.getProvider().getBlockNumber());
+      this.#reportTweets().then(() => interval(() => this.#reportTweets(), 10000))
     } catch (e) {
       console.log(JSON.stringify(e, null, 2))
     }
@@ -57,34 +58,39 @@ export class BotClient {
 
   async dryrun() {
     await this.#provider.init()
-    console.log(new Date().toString())
     this.#generateTweets().then(() => interval(async () => {this.#generateTweets()}, 10000))
   }
 
   async #generateTweets() {
     const pool: Types.IPool = this.#provider.connectContract(ParaspaceMM.Pool)
     const provider = this.#provider.getProvider()
-    // const blockHeight = await provider.getBlockNumber();
-    const blockHeight = 16313638
+    const blockHeight = await retry(() => provider.getBlockNumber());
 
+    logger.info({msg: `Round#${blockHeight}`, blockHeight, previousHeight: this.#currentHeight})
     if (blockHeight === this.#currentHeight) {
-      return null
+      return [] 
     }
 
-    const {transactions} = await provider.getBlockWithTransactions(16313638)
+    this.#currentHeight = blockHeight;
+    const {transactions} = await retry(() => provider.getBlockWithTransactions(blockHeight))
     const tweets = transactions.filter(tx => tx.to === pool.address).map(tx => {
       const description = pool.interface.parseTransaction(tx)
       return [description.name, tx.hash]
-    }).map(([name, hash]) => `${name}: ${hash}`)
-    return tweets.join("\n")
+    }).map(([name, hash]) => `${name}: https://etherscan.io/tx/${hash}`)
+    logger.info({msg: `${tweets.length} transactions found`, txn: tweets.length})
+    return tweets
   }
 
   async #reportTweets() {
     const tweets = await this.#generateTweets();
-    if(tweets !== null) {
-      await this.#client.tweets.createTweet({
-        text: await this.#generateTweets()
-      })
+    if (tweets.length !== 0) {
+      try {
+        await retry(this.#client.tweets.createTweet({
+          text: tweets.join("\n")
+        }))
+      } catch (e: any) {
+        console.log(JSON.stringify(e, null, 2))
+      }
     }
   }
 }

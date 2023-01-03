@@ -25,6 +25,8 @@
     "interval-promise": "^1.4.0",
     "koa": "^2.14.1",
     "paraspace-api": "^0.2.30",
+    "pino": "^8.8.0",
+    "promise-retry": "^2.0.1",
     "twitter-api-sdk": "^1.2.1"
   }
 }

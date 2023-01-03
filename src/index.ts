@@ -1,6 +1,5 @@
 import Koa from "koa"
 import Router from "@koa/router"
-import {store} from "./store.js"
 import {BotClient} from "./client.js"
 
 const bot = new BotClient()
