@@ -5,6 +5,7 @@
     "moduleResolution": "node",
     "module": "ES2022",
     "outDir": "dist/",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true
   }
 }
