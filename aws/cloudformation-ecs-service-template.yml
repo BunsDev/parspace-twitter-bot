@@ -1,0 +1,304 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: The template used to create an ECS Service.
+Parameters:
+  CertificateArn:
+    Type: String
+  ExecutionRoleArn:
+    Type: String
+  ECSClusterName:
+    Type: String
+  ApplicationName:
+    Type: String
+  EnvName:
+    Type: String
+  SecurityGroupIDs:
+    Type: AWS::SSM::Parameter::Value<List<AWS::EC2::SecurityGroup::Id>>
+  SubnetIDs:
+    Type: AWS::SSM::Parameter::Value<List<AWS::EC2::Subnet::Id>>
+  VpcID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::VPC::Id>
+  DockerImageUrl:
+    Type: String
+  EnvironmentFileUrl:
+    Type: String
+    Description: The s3 url that contains the list of ecs container environment variables
+  OpensearchPasswd:
+    Type: String
+  OpensearchHost:
+    Type: String
+  TaskDesiredCount:
+    Type: Number
+    Default: 1
+  TaskCpuSetting:
+    Type: Number
+    Default: 2048
+  TaskMemorySetting:
+    Type: Number
+    Default: 4096
+  AppPort:
+    Type: Number
+    Default: 3000
+  PagerDutyIntegrationKey:
+    Type: String
+    Default: ''
+
+Resources:
+  ECSService:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      Cluster: !Ref ECSClusterName
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Base: 0
+          Weight: 1
+      TaskDefinition: !Ref TaskDefinition
+      ServiceName: !Sub ${ApplicationName}-${EnvName}
+      DesiredCount: !Ref TaskDesiredCount
+      EnableExecuteCommand: true
+      LoadBalancers:
+        - ContainerName: !Sub ${ApplicationName}-${EnvName}
+          ContainerPort: !Ref AppPort
+          TargetGroupArn: !Ref TargetGroup
+      HealthCheckGracePeriodSeconds: '60'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: !Ref SecurityGroupIDs
+          Subnets: !Ref SubnetIDs
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DeploymentController:
+        Type: ECS
+    DependsOn: Listener
+  LoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: !Sub ${ApplicationName}-${EnvName}-alb
+      SecurityGroups: !Ref SecurityGroupIDs
+      Subnets: !Ref SubnetIDs
+      Type: application
+  TargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      VpcId: !Ref VpcID
+      Protocol: HTTP
+      Port: '443'
+      HealthCheckPath: /health
+      TargetType: ip
+  Listener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: '443'
+      Protocol: HTTPS
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ApplicationName}-${EnvName}
+      Cpu: !Ref TaskCpuSetting
+      Memory: !Ref TaskMemorySetting
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      TaskRoleArn: !Ref ExecutionRoleArn
+      ContainerDefinitions:
+        - Name: !Sub ${ApplicationName}-${EnvName}
+          Image: !Ref DockerImageUrl
+          EntryPoint:
+            - "/usr/local/bin/shush"
+            - "exec"
+            - "--"
+          Command:
+            - "pnpm"
+            - "start"
+          EnvironmentFiles:
+            - Type: s3
+              Value: !Ref EnvironmentFileUrl
+          PortMappings:
+            - ContainerPort: !Ref AppPort
+              HostPort: !Ref AppPort
+          LogConfiguration:
+            LogDriver: "awsfirelens"
+            Options:
+              AWS_Region: !Ref "AWS::Region"
+              HTTP_Passwd: !Ref OpensearchPasswd
+              HTTP_User: opensearch
+              Host: !Ref OpensearchHost
+              Index: !Sub ${ApplicationName}-${EnvName}
+              Name: es
+              Port: 443
+              Type: _doc
+              tls: On
+
+        - Name: log_router
+          Image: "906394416424.dkr.ecr.us-east-2.amazonaws.com/aws-for-fluent-bit:latest"
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-create-group: true
+              awslogs-group: !Sub ${ApplicationName}-${EnvName}-firelens
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: firelens
+          FirelensConfiguration:
+            Type: fluentbit
+            Options:
+              config-file-type: file
+              config-file-value: /fluent-bit/configs/parse-json.conf
+
+  TooManyHttpCodeElb5XXCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "TooMany_HTTPCode_ELB_5XX_Count_Alarm-${EnvName}-${ApplicationName}"
+      AlarmDescription: !Sub "TooMany_HTTPCode_ELB_5XX_Count_Alarm of ${ApplicationName} in environment ${EnvName}"
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+      Statistic: Sum
+      Period: 600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref PagerDutyTopic
+      OKActions:
+        - !Ref PagerDutyTopic
+
+  TargetResponseTimeTooSlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "TargetResponseTime-too-slow-${EnvName}-${ApplicationName}"
+      AlarmDescription: !Sub "TargetResponseTime is too slow for ${ApplicationName} in environment ${EnvName}"
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+      Statistic: Maximum
+      Period: 600
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref PagerDutyTopic
+      OKActions:
+        - !Ref PagerDutyTopic
+
+  HealthyHostCountTooLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "HealthyHostCountTooLow-alarm-${EnvName}-${ApplicationName}"
+      AlarmDescription: !Sub "The HealthyHostCount is too low for ${ApplicationName} in environment ${EnvName}"
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+      Statistic: Minimum
+      Period: 180
+      EvaluationPeriods: 1
+      Threshold: !Ref TaskDesiredCount
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref PagerDutyTopic
+      OKActions:
+        - !Ref PagerDutyTopic
+
+  PagerDutyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Sub "https://events.pagerduty.com/integration/${PagerDutyIntegrationKey}/enqueue"
+          Protocol: "HTTPS"
+
+# ASG setting begin
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+        - PolicyName: allow-ecs-cw-scaling
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                Resource: '*'
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 5
+      ResourceId: !Join ["/", [service, !Ref ECSClusterName, !GetAtt ECSService.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt AutoScalingRole.Arn
+  AutoScalingPolicyForCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ecs-cpu-utilization-ScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 120
+        TargetValue: 70.0
+  AutoScalingPolicyForMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ecs-memory-utilization-ScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 120
+        TargetValue: 75.0
+# ASG setting end
+
+Outputs:
+  ClusterName:
+    Description: The cluster used to create the service.
+    Value: !Ref ECSClusterName
+  ECSService:
+    Description: The created service.
+    Value: !Ref ECSService
+  LoadBalancer:
+    Description: The created load balancer.
+    Value: !Ref LoadBalancer
+  Listener:
+    Description: The created listener.
+    Value: !Ref Listener
+  TargetGroup:
+    Description: The created target group.
+    Value: !Ref TargetGroup
