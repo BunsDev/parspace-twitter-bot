@@ -9,7 +9,6 @@ on:
 jobs:
 
   wait-for-approval-prod:
-    needs: call-staging-deployment
     runs-on: ubuntu-latest
     environment: production-deployment
     steps:
