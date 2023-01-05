@@ -106,12 +106,3 @@ jobs:
             OpensearchPasswd=${{ secrets.OPENSEARCH_PASSWD }},
             OpensearchHost=${{ secrets.OPENSEARCH_HOST }},
             PagerDutyIntegrationKey=${{ secrets.PAGERDUTY_INTEGRATION_KEY }}
-
-      - name: slack
-        uses: 8398a7/action-slack@v3
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        with:
-          status: ${{ job.status }}
-          fields: repo,message,commit,author,eventName,ref,workflow
-        if: always()
