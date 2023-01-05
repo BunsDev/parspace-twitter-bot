@@ -86,7 +86,8 @@ Resources:
       Port: '443'
       HealthCheckPath: /health
       TargetType: ip
-      HttpCode: '200,404'
+      Matcher:
+        HttpCode: '200,404'
   Listener:
     Type: 'AWS::ElasticLoadBalancingV2::Listener'
     Properties:
